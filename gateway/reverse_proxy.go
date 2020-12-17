@@ -28,6 +28,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/gorilla/websocket"
 	"github.com/jensneuse/abstractlogger"
@@ -777,7 +778,6 @@ func (rt *TykRoundTripper) RoundTrip(r *http.Request) (*http.Response, error) {
 	return rt.transport.RoundTrip(r)
 }
 
-<<<<<<< HEAD
 func (p *ReverseProxy) handleOutboundRequest(roundTripper *TykRoundTripper, outreq *http.Request, w http.ResponseWriter) (res *http.Response, hijacked bool, latency time.Duration, err error) {
 	begin := time.Now()
 	defer func() {
@@ -929,7 +929,6 @@ func (p *ReverseProxy) sendRequestToUpstream(roundTripper *TykRoundTripper, outr
 	return roundTripper.RoundTrip(outreq)
 }
 
-=======
 func (p *ReverseProxy) verifyRootCA(tlsConfig *tls.Config, host string) {
 	tlsConfig.InsecureSkipVerify = true
 
@@ -998,7 +997,6 @@ func (p *ReverseProxy) verifyRootCA(tlsConfig *tls.Config, host string) {
 	}
 }
 
->>>>>>> 32ff8287 (added custom rootca validation)
 func (p *ReverseProxy) WrappedServeHTTP(rw http.ResponseWriter, req *http.Request, withCache bool) ProxyResponse {
 	if trace.IsEnabled() {
 		span, ctx := trace.Span(req.Context(), req.URL.Path)
@@ -1650,8 +1648,14 @@ func IsUpgrade(req *http.Request) (bool, string) {
 		return true, ""
 	}
 
-	connection := strings.ToLower(strings.TrimSpace(req.Header.Get(headers.Connection)))
-	if connection != "upgrade" {
+	// connection := strings.ToLower(strings.TrimSpace(req.Header.Get(headers.Connection)))
+	// if connection != "upgrade" {
+	// 	return false, ""
+	// }
+
+	//Firefox sends Connection: [keep-alive, Upgrade] which breaks TyK Connection upgrade header parsing
+	//Using gorilla websocket function to correclty parse the Connection header
+	if !tokenListContainsValue(req.Header, "Connection", "upgrade") {
 		return false, ""
 	}
 
@@ -1666,4 +1670,160 @@ func IsUpgrade(req *http.Request) (bool, string) {
 // IsGrpcStreaming  determines wether a request represents a grpc streaming req
 func IsGrpcStreaming(r *http.Request) bool {
 	return r.ContentLength == -1 && r.Header.Get(headers.ContentType) == "application/grpc"
+}
+
+// tokenListContainsValue returns true if the 1#token header with the given
+// name contains a token equal to value with ASCII case folding.
+func tokenListContainsValue(header http.Header, name string, value string) bool {
+headers:
+	for _, s := range header[name] {
+		for {
+			var t string
+			t, s = nextToken(skipSpace(s))
+			if t == "" {
+				continue headers
+			}
+			s = skipSpace(s)
+			if s != "" && s[0] != ',' {
+				continue headers
+			}
+			if equalASCIIFold(t, value) {
+				return true
+			}
+			if s == "" {
+				continue headers
+			}
+			s = s[1:]
+		}
+	}
+	return false
+}
+
+// Token octets per RFC 2616.
+var isTokenOctet = [256]bool{
+	'!':  true,
+	'#':  true,
+	'$':  true,
+	'%':  true,
+	'&':  true,
+	'\'': true,
+	'*':  true,
+	'+':  true,
+	'-':  true,
+	'.':  true,
+	'0':  true,
+	'1':  true,
+	'2':  true,
+	'3':  true,
+	'4':  true,
+	'5':  true,
+	'6':  true,
+	'7':  true,
+	'8':  true,
+	'9':  true,
+	'A':  true,
+	'B':  true,
+	'C':  true,
+	'D':  true,
+	'E':  true,
+	'F':  true,
+	'G':  true,
+	'H':  true,
+	'I':  true,
+	'J':  true,
+	'K':  true,
+	'L':  true,
+	'M':  true,
+	'N':  true,
+	'O':  true,
+	'P':  true,
+	'Q':  true,
+	'R':  true,
+	'S':  true,
+	'T':  true,
+	'U':  true,
+	'W':  true,
+	'V':  true,
+	'X':  true,
+	'Y':  true,
+	'Z':  true,
+	'^':  true,
+	'_':  true,
+	'`':  true,
+	'a':  true,
+	'b':  true,
+	'c':  true,
+	'd':  true,
+	'e':  true,
+	'f':  true,
+	'g':  true,
+	'h':  true,
+	'i':  true,
+	'j':  true,
+	'k':  true,
+	'l':  true,
+	'm':  true,
+	'n':  true,
+	'o':  true,
+	'p':  true,
+	'q':  true,
+	'r':  true,
+	's':  true,
+	't':  true,
+	'u':  true,
+	'v':  true,
+	'w':  true,
+	'x':  true,
+	'y':  true,
+	'z':  true,
+	'|':  true,
+	'~':  true,
+}
+
+// nextToken returns the leading RFC 2616 token of s and the string following
+// the token.
+func nextToken(s string) (token, rest string) {
+	i := 0
+	for ; i < len(s); i++ {
+		if !isTokenOctet[s[i]] {
+			break
+		}
+	}
+	return s[:i], s[i:]
+}
+
+// skipSpace returns a slice of the string s with all leading RFC 2616 linear
+// whitespace removed.
+func skipSpace(s string) (rest string) {
+	i := 0
+	for ; i < len(s); i++ {
+		if b := s[i]; b != ' ' && b != '\t' {
+			break
+		}
+	}
+	return s[i:]
+}
+
+// equalASCIIFold returns true if s is equal to t with ASCII case folding as
+// defined in RFC 4790.
+func equalASCIIFold(s, t string) bool {
+	for s != "" && t != "" {
+		sr, size := utf8.DecodeRuneInString(s)
+		s = s[size:]
+		tr, size := utf8.DecodeRuneInString(t)
+		t = t[size:]
+		if sr == tr {
+			continue
+		}
+		if 'A' <= sr && sr <= 'Z' {
+			sr = sr + 'a' - 'A'
+		}
+		if 'A' <= tr && tr <= 'Z' {
+			tr = tr + 'a' - 'A'
+		}
+		if sr != tr {
+			return false
+		}
+	}
+	return s == t
 }
