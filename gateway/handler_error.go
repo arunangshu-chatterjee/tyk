@@ -157,6 +157,7 @@ func (e *ErrorHandler) HandleError(w http.ResponseWriter, r *http.Request, errMs
 
 		}
 
+		// Cisco Change
 		//disable tyk.io header for request with NDProxyRequest
 		//Normalize header
 		log.Debug("Handler_error - Detected UpdateHostHeader ", e.BaseMiddleware.Spec.Proxy.NDProxyRequest)
@@ -166,8 +167,10 @@ func (e *ErrorHandler) HandleError(w http.ResponseWriter, r *http.Request, errMs
 		if ok {
 			log.Debug("Handler_error -  do not inject tyk.io header for proxy request - proxy header found ", ndProxyRequest)
 		} else if !e.Spec.GlobalConfig.HideGeneratorHeader {
-			w.Header().Add(headers.XGenerator, "tyk.io")
-			response.Header.Add(headers.XGenerator, "tyk.io")
+			// Cisco Change
+			// Change tyk.io to Cisco Nexus Dashboard
+			w.Header().Add(headers.XGenerator, "Cisco Nexus Dashboard")
+			response.Header.Add(headers.XGenerator, "Cisco Nexus Dashboard")
 		}
 
 		// Close connections
