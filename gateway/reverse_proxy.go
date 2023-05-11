@@ -1052,7 +1052,7 @@ func (p *ReverseProxy) WrappedServeHTTP(rw http.ResponseWriter, req *http.Reques
 		//override the connect timeout value if X-Nd-Proxy-Timeout header is set
 		timeout = p.GetTimeoutFromProxyHeader(p.TykAPISpec, req, timeout)
 
-		p.TykAPISpec.HTTPTransport = httpTransport(timeout, rw, req, p)
+		p.TykAPISpec.HTTPTransport = httpTransport(timeout, rw, req, nil, p)
 		p.TykAPISpec.HTTPTransportCreated = time.Now()
 
 		p.logger.Debug("Creating new transport")
@@ -1160,31 +1160,8 @@ func (p *ReverseProxy) WrappedServeHTTP(rw http.ResponseWriter, req *http.Reques
 	}
 
 	p.TykAPISpec.Lock()
-
-	// create HTTP transport
-	createTransport := p.TykAPISpec.HTTPTransport == nil
-
-	// Check if timeouts are set for this endpoint
-	if !createTransport && config.Global().MaxConnTime != 0 {
-		createTransport = time.Since(p.TykAPISpec.HTTPTransportCreated) > time.Duration(config.Global().MaxConnTime)*time.Second
-	}
-
-	if createTransport {
-		_, timeout := p.CheckHardTimeoutEnforced(p.TykAPISpec, req)
-		p.TykAPISpec.HTTPTransport = httpTransport(timeout, rw, req, outreq, p)
-		p.TykAPISpec.HTTPTransportCreated = time.Now()
-	}
-
-	roundTripper = p.TykAPISpec.HTTPTransport
-
-	if roundTripper.transport != nil {
-		roundTripper.transport.TLSClientConfig.Certificates = tlsCertificates
-	}
+	roundTripper.transport.TLSClientConfig.Certificates = tlsCertificates
 	p.TykAPISpec.Unlock()
-
-	if outreq.URL.Scheme == "h2c" {
-		outreq.URL.Scheme = "http"
-	}
 
 	if p.TykAPISpec.Proxy.Transport.SSLForceCommonNameCheck || config.Global().SSLForceCommonNameCheck {
 		// if proxy is enabled, add CommonName verification in verifyPeerCertificate
@@ -1215,12 +1192,36 @@ func (p *ReverseProxy) WrappedServeHTTP(rw http.ResponseWriter, req *http.Reques
 	}
 	log.Debug("Root Varification Done")
 	// do request round trip
-	var (
-		res             *http.Response
-		isHijacked      bool
-		upstreamLatency time.Duration
-		err             error
-	)
+	var res *http.Response
+	var err error
+	var upstreamLatency time.Duration
+
+	sendRequestToUpstream := func() {
+		begin := time.Now()
+		if p.TykAPISpec.GraphQL.Enabled && p.TykAPISpec.GraphQL.ExecutionMode == apidef.GraphQLExecutionModeExecutionEngine {
+
+			if p.TykAPISpec.GraphQLExecutor.Engine == nil {
+				err = errors.New("execution engine is nil")
+				return
+			}
+
+			gqlRequest := ctxGetGraphQLRequest(outreq)
+			if gqlRequest == nil {
+				err = errors.New("graphql request is nil")
+				return
+			}
+
+			p.TykAPISpec.GraphQLExecutor.Client.Transport = roundTripper
+			var result *graphql.ExecutionResult
+			result, err = p.TykAPISpec.GraphQLExecutor.Engine.Execute(context.Background(), gqlRequest, graphql.ExecutionOptions{ExtraArguments: gqlRequest.Variables})
+			res = result.GetAsHTTPResponse()
+
+		} else {
+			res, err = roundTripper.RoundTrip(outreq)
+		}
+
+		upstreamLatency = time.Since(begin)
+	}
 
 	if breakerEnforced {
 		if !breakerConf.CB.Ready() {
@@ -1229,15 +1230,14 @@ func (p *ReverseProxy) WrappedServeHTTP(rw http.ResponseWriter, req *http.Reques
 			return ProxyResponse{}
 		}
 		p.logger.Debug("ON REQUEST: Circuit Breaker is in CLOSED or HALF-OPEN state")
-
-		res, isHijacked, upstreamLatency, err = p.handleOutboundRequest(roundTripper, outreq, rw)
+		sendRequestToUpstream()
 		if err != nil || res.StatusCode/100 == 5 {
 			breakerConf.CB.Fail()
 		} else {
 			breakerConf.CB.Success()
 		}
 	} else {
-		res, isHijacked, upstreamLatency, err = p.handleOutboundRequest(roundTripper, outreq, rw)
+		sendRequestToUpstream()
 	}
 
 	if err != nil {
@@ -1295,10 +1295,6 @@ func (p *ReverseProxy) WrappedServeHTTP(rw http.ResponseWriter, req *http.Reques
 
 	}
 
-	if isHijacked {
-		return ProxyResponse{UpstreamLatency: upstreamLatency}
-	}
-
 	upgrade, _ := IsUpgrade(req)
 	// Deal with 101 Switching Protocols responses: (WebSocket, h2c, etc)
 	if upgrade {
@@ -1308,7 +1304,7 @@ func (p *ReverseProxy) WrappedServeHTTP(rw http.ResponseWriter, req *http.Reques
 		}
 	}
 
-	ses := new(user.SessionState)
+	ses := user.NewSessionState()
 	if session != nil {
 		ses = session
 	}
