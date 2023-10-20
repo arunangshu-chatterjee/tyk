@@ -18,6 +18,7 @@ import (
 
 	jwt "github.com/dgrijalva/jwt-go"
 	cache "github.com/pmylund/go-cache"
+	redis "github.com/go-redis/redis"
 
 	"github.com/TykTechnologies/tyk/apidef"
 	"github.com/TykTechnologies/tyk/config"
@@ -59,6 +60,13 @@ type JWK struct {
 
 type JWKs struct {
 	Keys []JWK `json:"keys"`
+}
+
+type UserSession struct {
+	Iat      int64  `json:"iat"`
+	Exp      int64  `json:"exp"`
+	Usertype string `json:"usertype"`
+	Valid    bool   `json:"valid"`
 }
 
 func (k *JWTMiddleware) getSecretFromURL(url, kid, keyType string) ([]byte, error) {
@@ -684,6 +692,11 @@ func (k *JWTMiddleware) ProcessRequest(w http.ResponseWriter, r *http.Request, _
 			}
 		}
 
+		// Cisco change - Check Redis for token validity
+		if err := logoutValidateJWT(token.Claims.(jwt.MapClaims)); err != nil {
+			return errors.New(err.Error()), http.StatusUnauthorized
+		}
+
 		// Token is valid - let's move on
 
 		// Are we mapping to a central JWT Secret?
@@ -926,4 +939,68 @@ func generateSessionFromPolicy(policyID, orgID string, enforceOrg bool) (user.Se
 	}
 
 	return session.Clone(), nil
+}
+
+// logoutValidateJWT checks validity to enforce JWT isn't used post logout
+func logoutValidateJWT(c jwt.MapClaims) error {
+	var session UserSession
+	data, err := readSessionDataFromRedis(c)
+	if err != nil {
+		return err
+	} else if err == nil && data == nil {
+		return nil
+	}
+
+	if err = json.Unmarshal(data, &session); err != nil {
+		log.Error("could not unmarshal session data")
+		return err
+	}
+
+	if !session.Valid {
+		log.Error("jwt provided is invalid")
+		return fmt.Errorf("jwt provided is invalid")
+	}
+	return nil
+}
+
+// readSessionDataFromRedis reads session data from Redis store
+func readSessionDataFromRedis(c jwt.MapClaims) ([]byte, error) {
+	username, usernameOk := c["username"]
+	sessionid, sessionidOk := c["sessionid"]
+	usertype, usertypeOk := c["usertype"]
+
+	if !usernameOk || !sessionidOk || !usertypeOk {
+		log.Error("could not find username/usertype/sessionid claim in jwt")
+        return nil, fmt.Errorf("could not find username/usertype/sessionid claim in jwt")
+	}
+
+	if uType := fmt.Sprintf("%v", usertype); uType != "local" && uType != "remote" {
+		log.Info("user type is not local or remote - skipping Redis store JWT lookup")
+		return nil, nil
+	}
+
+	key := fmt.Sprintf("%v", username) + "-" + fmt.Sprintf("%v", sessionid)
+
+	// new redis client
+	client := redis.NewClient(&redis.Options{
+		Addr: "127.0.0.1:6379",
+		Password: "",
+		DB: 0,
+	})
+
+	// test connection
+	_, err := client.Ping().Result()
+	if err != nil {
+		log.Error("Could not ping Redis")
+		return nil, fmt.Errorf("Could not ping Redis")
+	}
+
+	// Get jwt key from user as value
+	value, err := client.Get(key).Bytes()
+    if err != nil {
+        log.Error(fmt.Sprintf("GET failed for key: %v. Error: %v", key, err))
+		return nil, fmt.Errorf("GET failed for key: %v. Error: %v", key, err)
+    }
+	log.Info(fmt.Sprintf("GET succeeded for key: %v", key))
+	return value, nil
 }
