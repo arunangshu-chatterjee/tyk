@@ -474,7 +474,7 @@ func (a APIDefinitionLoader) FromRedis(db config.RedisDBAppConfOptionsConfig) ([
 	var count = 0
 	for _, v := range apiKeys {
 		//Skip loading JWT-KEY keys
-		if !strings.HasPrefix(v, "JWT-KEY-") {
+		if !strings.HasPrefix(v, "JWT-KEY-") && !strings.HasPrefix(v, "LOGOUT-EXPIRED-COOKIE-") {
 			count++
 			apiDefinition, _ := redis.String(c.Do("GET", v))
 			def := a.ParseDefinition(strings.NewReader(apiDefinition))

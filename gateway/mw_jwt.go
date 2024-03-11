@@ -22,6 +22,7 @@ import (
 	"github.com/TykTechnologies/tyk/apidef"
 	"github.com/TykTechnologies/tyk/config"
 	"github.com/TykTechnologies/tyk/user"
+	"github.com/garyburd/redigo/redis"
 )
 
 type JWTMiddleware struct {
@@ -598,6 +599,11 @@ func (k *JWTMiddleware) ProcessRequest(w http.ResponseWriter, r *http.Request, _
 	// enable bearer token format
 	rawJWT = stripBearer(rawJWT)
 
+	// Check if JWT is force expired due to logout
+	if cookieForceExpiredOnLogout(rawJWT) {
+		return errors.New("Authorization attempted with expired JWT"), http.StatusUnauthorized
+	}
+
 	// Use own validation logic, see below
 	parser := &jwt.Parser{SkipClaimsValidation: true}
 
@@ -926,4 +932,22 @@ func generateSessionFromPolicy(policyID, orgID string, enforceOrg bool) (user.Se
 	}
 
 	return session.Clone(), nil
+}
+
+// ND 3.2 Congo changes
+// func cookieForceExpiredOnLogout checks if the supplied JWT is force expired
+// due to logout. It does a GET query on Redis with the key format as
+// LOGOUT-EXPIRED-COOKIE-<jwt>. If the key is found, the supplied JWT is deemed unauthorized
+func cookieForceExpiredOnLogout(jwt string) bool {
+	c := RedisPool.Get()
+	defer c.Close()
+	log.Debug("Try loading logout expired cookie from redis")
+	key := "LOGOUT-EXPIRED-COOKIE-" + jwt
+	if _, err := redis.Strings(c.Do("GET", key)); err != nil {
+		log.Debug("Didn't find cookie marked as expired in redis db")
+		return false
+	} else {
+		log.Errorf("Found cookie as expired in redis db: %v", err)
+	}
+	return true
 }
